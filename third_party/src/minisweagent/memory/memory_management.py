@@ -136,7 +136,9 @@ def select_memory(n: int,
                   cur_query: str,
                   task_id: str = None,
                   cache_path: str = "./memories/embeddings.jsonl",
-                  prefer_model: str = "gemini") -> Dict:
+                  prefer_model: str = "gemini",
+                  exclude_task_ids: list[str] | None = None,
+                  append_current: bool = False) -> Dict:
     """
     Returns a dict of top-n items by ID -> (optionally) original metadata.
     This uses ONLY the cached embeddings; it does not recompute them.
@@ -147,19 +149,28 @@ def select_memory(n: int,
     id2score, ordered_ids = screening(cur_query=cur_query,
                                       task_id=task_id,
                                       cache_path=cache_path,
-                                      prefer_model=prefer_model)
+                                      prefer_model=prefer_model,
+                                      exclude_task_ids=exclude_task_ids or ([str(task_id)] if task_id is not None else None),
+                                      append_current=append_current)
 
     if not ordered_ids:
         return {}
 
     top_ids = ordered_ids[:n]
 
-    # optional: map back to your in-memory store if you have it
+    # optional: map back to your in-memory store if you have one
     # below assumes your cache ids correspond 1:1 to indices in reasoning_bank
+    excluded_ids = {str(x) for x in (exclude_task_ids or [])}
+    if task_id is not None:
+        excluded_ids.add(str(task_id))
     out = []
     for sid in top_ids:
-        # find the corresponding reasoning bank entry, with reasoning_bank["task_id"] == sid
+        # find the corresponding reasoning bank entry by task_id
+        if str(sid) in excluded_ids:
+            continue
         for i, item in enumerate(reasoning_bank):
+            if str(item["task_id"]) in excluded_ids:
+                continue
             if item["task_id"] == sid:
                 out.append(reasoning_bank[i])
                 break
@@ -168,7 +179,9 @@ def select_memory(n: int,
 def screening(cur_query: str,
               cache_path: str,
               task_id: str = None,
-              prefer_model: str = "",) -> Tuple[List[Tuple[str, float]], List[str]]:
+              prefer_model: str = "",
+              exclude_task_ids: list[str] | None = None,
+              append_current: bool = False,) -> Tuple[List[Tuple[str, float]], List[str]]:
     """
     Compute similarity of current query against cached embeddings, optionally append the query embedding to cache.
     """
@@ -182,15 +195,16 @@ def screening(cur_query: str,
     else:
         q_vec = embed_query_with_gemini(cur_query, dimensionality=3072)
 
-    # write current query embeddings to cache
-    record = {
-        "id": task_id,
-        "text": cur_query,
-        "embedding": q_vec.squeeze(0).tolist(),
-    }
-    with open(cache_path, "a") as f:
-        f.write(json.dumps(record) + "\n")
-    logger.info(f"Appended new query embedding to cache: webarena.{task_id}")
+    # write current query embeddings to cache unless retrieval is read-only
+    if append_current:
+        record = {
+            "id": task_id,
+            "text": cur_query,
+            "embedding": q_vec.squeeze(0).tolist(),
+        }
+        with open(cache_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        logger.info(f"Appended new query embedding to cache: webarena.{task_id}")
 
     if len(cache_emb) == 0:
         logger.warning(f"No cached embeddings found in {cache_path}.")
@@ -204,8 +218,11 @@ def screening(cur_query: str,
     instruct_vec = l2_normalize(instruct_vec, dim=1)
 
     # Calculate similarity scores for embeddings and current query
+    excluded = {str(x) for x in (exclude_task_ids or [])}
+    if task_id is not None:
+        excluded.add(str(task_id))
     scores = (instruct_vec @ cache_emb.T).squeeze(0) * 100.0  # (N,)
-    id2score = list(zip(cache_ids, scores.tolist()))
+    id2score = [(sid, score) for sid, score in zip(cache_ids, scores.tolist()) if str(sid) not in excluded]
     id2score.sort(key=lambda x: x[1], reverse=True)
 
     return id2score, [str(i) for i, _ in id2score]
