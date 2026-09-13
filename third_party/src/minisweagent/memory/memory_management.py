@@ -138,11 +138,14 @@ def select_memory(n: int,
                   cache_path: str = "./memories/embeddings.jsonl",
                   prefer_model: str = "gemini",
                   exclude_task_ids: list[str] | None = None,
-                  append_current: bool = False) -> Dict:
+                  append_current: bool = True) -> Dict:
     """
-    Returns a dict of top-n items by ID -> (optionally) original metadata.
-    This uses ONLY the cached embeddings; it does not recompute them.
+    Return up to n distinct eligible memories, excluding the current task.
+    Cached document vectors are reused. Query embedding/cache insertion keeps
+    the runner's existing default; append_current=False disables insertion.
     """
+    if n <= 0:
+        return []
     if n > 10:
         logger.error("the number of return experiences shouldn't be greater than 10")
 
@@ -150,13 +153,14 @@ def select_memory(n: int,
                                       task_id=task_id,
                                       cache_path=cache_path,
                                       prefer_model=prefer_model,
-                                      exclude_task_ids=exclude_task_ids or ([str(task_id)] if task_id is not None else None),
+                                      exclude_task_ids=exclude_task_ids,
                                       append_current=append_current)
 
     if not ordered_ids:
         return {}
 
-    top_ids = ordered_ids[:n]
+    # Apply the limit after exclusions, duplicate IDs and absent bank rows.
+    top_ids = ordered_ids
 
     # optional: map back to your in-memory store if you have one
     # below assumes your cache ids correspond 1:1 to indices in reasoning_bank
@@ -168,12 +172,13 @@ def select_memory(n: int,
         # find the corresponding reasoning bank entry by task_id
         if str(sid) in excluded_ids:
             continue
+        excluded_ids.add(str(sid))
         for i, item in enumerate(reasoning_bank):
-            if str(item["task_id"]) in excluded_ids:
-                continue
-            if item["task_id"] == sid:
+            if str(item["task_id"]) == str(sid):
                 out.append(reasoning_bank[i])
                 break
+        if len(out) == n:
+            break
     return out
 
 def screening(cur_query: str,
@@ -181,10 +186,12 @@ def screening(cur_query: str,
               task_id: str = None,
               prefer_model: str = "",
               exclude_task_ids: list[str] | None = None,
-              append_current: bool = False,) -> Tuple[List[Tuple[str, float]], List[str]]:
+              append_current: bool = True,) -> Tuple[List[Tuple[str, float]], List[str]]:
     """
     Compute similarity of current query against cached embeddings, optionally append the query embedding to cache.
     """
+    if not append_current and not os.path.exists(cache_path):
+        return [], []
     cache_ids, cache_texts, cache_emb = load_cached_embeddings(cache_path)
 
     # choose embedding method to match the cache
